@@ -1,8 +1,11 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Tasks;
+using System.Timers;
 using Kadmium_Udp;
 using KadmiumRtpMidi.Packets;
 using Makaretu.Dns;
@@ -11,79 +14,79 @@ namespace KadmiumRtpMidi
 {
 	public class Session
 	{
-		IUdpWrapper ControlPortWrapper { get; }
-		IUdpWrapper MidiPortWrapper { get; }
-		ServiceProfile ServiceProfile { get; }
-		ServiceDiscovery ServiceDiscovery { get; }
+		private IUdpWrapper ControlPortListener { get; }
+		private IUdpWrapper MidiPortListener { get; }
+		private ServiceProfile ServiceProfile { get; }
+		private ServiceDiscovery ServiceDiscovery { get; }
+		private MulticastService Mdns { get; }
+		private UInt32 Ssrc { get; }
+		private string BonjourName { get; }
+		private IPEndPoint ControlEndPoint { get; }
+		private IPEndPoint MidiEndPoint { get; }
+		private ushort LastSequenceNumber { get; set; } = 0;
+		private Timer ResponseTimer { get; }
+		private IPEndPoint RemoteEndPoint { get; set; }
 
-		public Session(ushort port)
+		public event EventHandler<PacketReceivedEventArgs> OnPacketReceived;
+		public Session(IPAddress address, ushort port, string serviceName)
 		{
-			ControlPortWrapper = new UdpWrapper();
-			ControlPortWrapper.OnPacketReceived += async (sender, e) =>
+			BonjourName = serviceName;
+			Ssrc = (uint)new Random().Next();
+
+			ControlEndPoint = new IPEndPoint(IPAddress.Any, port);
+			MidiEndPoint = new IPEndPoint(IPAddress.Any, port + 1);
+
+			ControlPortListener = new UdpWrapper();
+			ControlPortListener.OnPacketReceived += OnControlPortPacketReceived;
+			ControlPortListener.Listen(ControlEndPoint);
+
+			MidiPortListener = new UdpWrapper();
+			MidiPortListener.OnPacketReceived += OnMidiPortPacketReceived;
+			MidiPortListener.Listen(MidiEndPoint);
+
+			ResponseTimer = new Timer(5000);
+			ResponseTimer.Elapsed += async (sender, e) =>
 			{
-				var packet = Packet.Parse(e.Buffer);
-				if (packet is ControlPacket ctrl)
+				if (RemoteEndPoint != null)
 				{
-					switch (ctrl.Command)
+					var ackPacket = new AcknowledgementPacket
 					{
-						case ControlPacketCommand.IN:
-							Console.WriteLine("Invitation received from " + ctrl.Name + " at " + e.RemoteEndPoint);
-							await Respond(ctrl, e.RemoteEndPoint);
-							break;
-						default:
-							Console.WriteLine("Received " + ctrl.Command + " packet");
-							break;
+						Ssrc = Ssrc,
+						SequenceNumber = LastSequenceNumber
+					};
+					using (var owner = MemoryPool<byte>.Shared.Rent(AcknowledgementPacket.Length))
+					{
+						var packetMem = owner.Memory[0..AcknowledgementPacket.Length];
+						ackPacket.WriteTo(packetMem);
+						await ControlPortListener.Send(RemoteEndPoint, ControlEndPoint, packetMem);
 					}
 				}
 			};
-			ControlPortWrapper.Listen(new IPEndPoint(IPAddress.Any, port));
+			ResponseTimer.Start();
 
-			MidiPortWrapper = new UdpWrapper();
-			MidiPortWrapper.OnPacketReceived += (sender, e) =>
+			Mdns = new MulticastService((nics) =>
 			{
-				var packet = Packet.Parse(e.Buffer);
-				if (packet is ControlPacket ctrl)
-				{
-					switch (ctrl.Command)
-					{
-						case ControlPacketCommand.IN:
-							Console.WriteLine("Invitation received from " + ctrl.Name + " at " + e.RemoteEndPoint);
-							var response = new ControlPacket
-							{
-								Command = ControlPacketCommand.OK,
-								Name = "MyThing",
-								Ssrc = 927230719,
-								ProtocolVersion = 2,
-								InitiatorToken = ctrl.InitiatorToken
-							};
-							using (var owner = MemoryPool<byte>.Shared.Rent(response.Length))
-							{
-								var packetMem = owner.Memory[0..response.Length];
-								response.WriteTo(packetMem);
-								MidiPortWrapper.Send(e.RemoteEndPoint, packetMem);
-							}
+				var matchingNics = from nic in nics
+								   from nicAddress in nic.GetIPProperties().UnicastAddresses
+								   where nicAddress.Address.Equals(address)
+								   select nic;
+				return matchingNics;
+			});
 
-							break;
-					}
-				}
-			};
-			MidiPortWrapper.Listen(new IPEndPoint(IPAddress.Any, port + 1));
-
-			var mdns = new MulticastService();
-			mdns.QueryReceived += (s, e) =>
+			Mdns.QueryReceived += (s, e) =>
 			{
 				var names = e.Message.Questions
 					.Select(q => q.Name + " " + q.Type);
 				Console.WriteLine($"got a query for {String.Join(", ", names)}");
 			};
-			mdns.AnswerReceived += (s, e) =>
+			Mdns.AnswerReceived += (s, e) =>
 			{
 				var names = e.Message.Answers
 					.Select(q => q.Name + " " + q.Type)
 					.Distinct();
 				Console.WriteLine($"got answer for {String.Join(", ", names)}");
 			};
-			mdns.NetworkInterfaceDiscovered += (s, e) =>
+			Mdns.NetworkInterfaceDiscovered += (s, e) =>
 			{
 				foreach (var nic in e.NetworkInterfaces)
 				{
@@ -91,31 +94,117 @@ namespace KadmiumRtpMidi
 				}
 			};
 
-			ServiceProfile = new ServiceProfile("looool", "_apple-midi._udp", port);
-			ServiceDiscovery = new ServiceDiscovery(mdns);
-			ServiceDiscovery.Advertise(ServiceProfile);
-
-			ServiceDiscovery.ServiceDiscovered += (sender, discoveredEvent) =>
-			{
-				Console.WriteLine(discoveredEvent);
-			};
+			var sd = new ServiceDiscovery(Mdns);
+			sd.Advertise(new ServiceProfile("ipfs1", "_ipfs-discovery._udp", 5010));
+			sd.Advertise(new ServiceProfile(BonjourName, "_apple-midi._udp", port));
+			Mdns.Start();
 		}
 
-		private async Task Respond(ControlPacket invitation, IPEndPoint remoteEndpoint)
+		private async void OnControlPortPacketReceived(object sender, UdpReceiveResult e)
 		{
-			var response = new ControlPacket
+			var packet = Packet.Parse(e.Buffer);
+			switch (packet)
+			{
+				case InvitationPacket invitation:
+					Console.WriteLine("Control Port invitation received from " + invitation.Name + " at " + e.RemoteEndPoint);
+					await Respond(invitation, e.RemoteEndPoint, ControlPortListener, ControlEndPoint);
+					RemoteEndPoint = e.RemoteEndPoint;
+					break;
+				case ClockSyncPacket sync:
+					Console.WriteLine("Control Port clock sync received");
+					await Respond(sync, e.RemoteEndPoint, ControlPortListener, ControlEndPoint);
+					break;
+				case SessionClosePacket close:
+					Console.WriteLine("Control Port session close received");
+					RemoteEndPoint = null;
+					break;
+				case ControlPacket ctrl:
+					switch (ctrl.Command)
+					{
+						default:
+							Console.WriteLine("Received " + ctrl.Command + " packet");
+							break;
+					}
+					break;
+				default:
+					Console.WriteLine("non control packet received on control port");
+					break;
+			}
+		}
+
+		private async void OnMidiPortPacketReceived(object sender, UdpReceiveResult e)
+		{
+			var packet = Packet.Parse(e.Buffer);
+			switch (packet)
+			{
+				case InvitationPacket invitation:
+					Console.WriteLine("MIDI Invitation received from " + invitation.Name + " at " + e.RemoteEndPoint);
+					await Respond(invitation, e.RemoteEndPoint, MidiPortListener, MidiEndPoint);
+					break;
+				case ClockSyncPacket sync:
+					Console.WriteLine("MIDI clock sync received");
+					await Respond(sync, e.RemoteEndPoint, MidiPortListener, MidiEndPoint);
+					break;
+				case ControlPacket ctrl:
+					switch (ctrl.Command)
+					{
+						default:
+							Console.WriteLine("MIDI Received " + ctrl.Command + " packet");
+							break;
+					}
+					break;
+				case DataPacket data:
+					if (
+						(data.SequenceNumber > LastSequenceNumber)
+						|| ((ushort.MaxValue - LastSequenceNumber) < 100 && (data.SequenceNumber - ushort.MinValue) < 100)
+					)
+					{
+						LastSequenceNumber = data.SequenceNumber;
+					}
+					OnPacketReceived?.Invoke(e.RemoteEndPoint, new PacketReceivedEventArgs(data));
+					break;
+				default:
+					Console.WriteLine("non control packet received on midi port");
+					break;
+			}
+		}
+
+		private async Task Respond(InvitationPacket invitation, IPEndPoint remoteEndpoint, IUdpWrapper localWrapper, IPEndPoint localEndpoint)
+		{
+			var response = new InvitationPacket
 			{
 				Command = ControlPacketCommand.OK,
-				Name = "MyThing",
-				Ssrc = 927230719,
-				ProtocolVersion = 2,
+				Name = BonjourName,
+				Ssrc = Ssrc,
 				InitiatorToken = invitation.InitiatorToken
 			};
-			using var owner = MemoryPool<byte>.Shared.Rent(response.Length);
+			using (var owner = MemoryPool<byte>.Shared.Rent(response.Length))
+			{
+				var packetMem = owner.Memory[0..response.Length];
+				response.WriteTo(packetMem);
+				await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
+			}
+		}
 
-			var packetMem = owner.Memory[0..response.Length];
-			response.WriteTo(packetMem);
-			await ControlPortWrapper.Send(new IPEndPoint(remoteEndpoint.Address, 5004), packetMem);
+		private async Task Respond(ClockSyncPacket initial, IPEndPoint remoteEndpoint, IUdpWrapper localWrapper, IPEndPoint localEndpoint)
+		{
+			var response = new ClockSyncPacket
+			{
+				Command = ControlPacketCommand.OK,
+				Ssrc = Ssrc,
+				TimestampCount = (byte)(initial.TimestampCount + 1),
+				Timestamps = new UInt64[3]
+			};
+			initial.Timestamps.CopyTo(response.Timestamps, 0);
+			var timestamp = DateTime.Now.Ticks / 1000;
+			response.Timestamps[1] = (ulong)timestamp;
+
+			using (var owner = MemoryPool<byte>.Shared.Rent(response.Length))
+			{
+				var packetMem = owner.Memory[0..response.Length];
+				response.WriteTo(packetMem);
+				await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
+			}
 		}
 	}
 }

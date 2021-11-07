@@ -1,11 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net5.0</TargetFramework>
+    <TargetFramework>netstandard2.1</TargetFramework>
+  </PropertyGroup>
+
+  <PropertyGroup>
+
+    <Title>Kadmium RTP Midi</Title>
+    <Description>An RTP MIDI package for .Net Standard</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Version>0.0.1</Version>
+    <Authors>Jesse Higginson</Authors>
+    <PackageProjectUrl>https://github.com/iKadmium/kadmium-rtp-midi</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/iKadmium/kadmium-rtp-midi.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="kadmium-udp" Version="1.0.1" />
+    <PackageReference Include="kadmium-udp" Version="1.1.3" />
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
   </ItemGroup>
 
