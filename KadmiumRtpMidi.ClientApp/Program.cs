@@ -12,7 +12,11 @@ namespace KadmiumRtpMidi.ClientApp
 		{
 			var hostname = Dns.GetHostName();
 			var addresses = await Dns.GetHostAddressesAsync(hostname);
-			var session = new Session(addresses.First(x => x.ToString().StartsWith("192")), 5023, "Kadmium-rtp-midi");
+			foreach (var address in addresses)
+			{
+				Console.WriteLine(address);
+			}
+			var session = new Session(addresses.First(), 5023, "Kadmium-rtp-midi");
 			session.OnPacketReceived += async (sender, e) => await Console.Out.WriteLineAsync(e.Packet.ToString());
 			while (true)
 			{
