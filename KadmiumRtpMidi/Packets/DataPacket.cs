@@ -55,14 +55,14 @@ namespace KadmiumRtpMidi.Packets
 			ReadOnlySpan<byte> commands;
 			if (bigHeader)
 			{
-				var len1 = (span[12] & 0b_0000_1111);
+				var len1 = span[12] & 0b_0000_1111;
 				var len2 = span[13];
 				var len = (len1 << 8) | len2;
 				commands = span[14..(14 + len)];
 			}
 			else
 			{
-				var len = (span[12] & 0b_0000_1111);
+				var len = span[12] & 0b_0000_1111;
 				commands = span[13..(13 + len)];
 			}
 
