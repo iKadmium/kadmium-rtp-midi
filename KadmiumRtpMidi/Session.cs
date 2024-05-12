@@ -1,7 +1,9 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -16,8 +18,6 @@ namespace KadmiumRtpMidi
 	{
 		private IUdpWrapper ControlPortListener { get; }
 		private IUdpWrapper MidiPortListener { get; }
-		private ServiceProfile ServiceProfile { get; }
-		private ServiceDiscovery ServiceDiscovery { get; }
 		private MulticastService Mdns { get; }
 		private UInt32 Ssrc { get; }
 		private string BonjourName { get; }
@@ -25,9 +25,10 @@ namespace KadmiumRtpMidi
 		private IPEndPoint MidiEndPoint { get; }
 		private ushort LastSequenceNumber { get; set; } = 0;
 		private Timer ResponseTimer { get; }
-		private IPEndPoint RemoteEndPoint { get; set; }
+		private List<IPEndPoint> RemoteEndPoints { get; } = new List<IPEndPoint>();
 
 		public event EventHandler<PacketReceivedEventArgs> OnPacketReceived;
+		
 		public Session(IPAddress address, ushort port, string serviceName)
 		{
 			BonjourName = serviceName;
@@ -47,19 +48,22 @@ namespace KadmiumRtpMidi
 			ResponseTimer = new Timer(5000);
 			ResponseTimer.Elapsed += async (sender, e) =>
 			{
-				if (RemoteEndPoint != null)
+				if (RemoteEndPoints != null)
 				{
 					var ackPacket = new AcknowledgementPacket
 					{
 						Ssrc = Ssrc,
 						SequenceNumber = LastSequenceNumber
 					};
-					using (var owner = MemoryPool<byte>.Shared.Rent(AcknowledgementPacket.Length))
+					using var owner = MemoryPool<byte>.Shared.Rent(AcknowledgementPacket.Length);
+					var packetMem = owner.Memory[0..AcknowledgementPacket.Length];
+					ackPacket.WriteTo(packetMem);
+					var tasks = new List<Task>();
+					foreach (var endpoint in RemoteEndPoints)
 					{
-						var packetMem = owner.Memory[0..AcknowledgementPacket.Length];
-						ackPacket.WriteTo(packetMem);
-						await ControlPortListener.Send(RemoteEndPoint, ControlEndPoint, packetMem);
+						tasks.Add(ControlPortListener.Send(endpoint, ControlEndPoint, packetMem));
 					}
+					await Task.WhenAll(tasks);
 				}
 			};
 			ResponseTimer.Start();
@@ -108,7 +112,7 @@ namespace KadmiumRtpMidi
 				case InvitationPacket invitation:
 					Console.WriteLine("Control Port invitation received from " + invitation.Name + " at " + e.RemoteEndPoint);
 					await Respond(invitation, e.RemoteEndPoint, ControlPortListener, ControlEndPoint);
-					RemoteEndPoint = e.RemoteEndPoint;
+					RemoteEndPoints.Add(e.RemoteEndPoint);
 					break;
 				case ClockSyncPacket sync:
 					Console.WriteLine("Control Port clock sync received");
@@ -116,7 +120,13 @@ namespace KadmiumRtpMidi
 					break;
 				case SessionClosePacket close:
 					Console.WriteLine("Control Port session close received");
-					RemoteEndPoint = null;
+					RemoteEndPoints.Remove(e.RemoteEndPoint);
+					break;
+				case InvitationResponsePacket response:
+					Console.WriteLine("Invitation Response received");
+					RemoteEndPoints.Add(e.RemoteEndPoint);
+					var midiRemoteEndpoint = new IPEndPoint(e.RemoteEndPoint.Address, e.RemoteEndPoint.Port + 1);
+					await Invite(midiRemoteEndpoint, MidiPortListener, MidiEndPoint);
 					break;
 				case ControlPacket ctrl:
 					switch (ctrl.Command)
@@ -145,6 +155,9 @@ namespace KadmiumRtpMidi
 					Console.WriteLine("MIDI clock sync received");
 					await Respond(sync, e.RemoteEndPoint, MidiPortListener, MidiEndPoint);
 					break;
+				case InvitationResponsePacket response:
+					Console.WriteLine("MIDI Invitation response received from " + response.Name + " at " + e.RemoteEndPoint);
+					break;
 				case ControlPacket ctrl:
 					switch (ctrl.Command)
 					{
@@ -161,12 +174,37 @@ namespace KadmiumRtpMidi
 					{
 						LastSequenceNumber = data.SequenceNumber;
 					}
+					var tasks = new List<Task>();
+					foreach (var endpoint in RemoteEndPoints.Except(new[] { e.RemoteEndPoint }))
+					{
+						tasks.Add(this.MidiPortListener.Send(endpoint, e.Buffer));
+					}
+					await Task.WhenAll(tasks);
 					OnPacketReceived?.Invoke(e.RemoteEndPoint, new PacketReceivedEventArgs(data));
 					break;
 				default:
 					Console.WriteLine("non control packet received on midi port");
 					break;
 			}
+		}
+
+		public async Task Invite(IPEndPoint remoteEndpoint)
+		{
+			await Invite(remoteEndpoint, ControlPortListener, ControlEndPoint);
+		}
+
+		private async Task Invite(IPEndPoint remoteEndpoint, IUdpWrapper localWrapper, IPEndPoint localEndpoint)
+		{
+			var invitation = new InvitationPacket
+			{
+				Command = ControlPacketCommand.IN,
+				Name = BonjourName,
+				Ssrc = Ssrc
+			};
+			using var owner = MemoryPool<byte>.Shared.Rent(invitation.Length);
+			var packetMem = owner.Memory[0..invitation.Length];
+			invitation.WriteTo(packetMem);
+			await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
 		}
 
 		private async Task Respond(InvitationPacket invitation, IPEndPoint remoteEndpoint, IUdpWrapper localWrapper, IPEndPoint localEndpoint)
@@ -178,12 +216,10 @@ namespace KadmiumRtpMidi
 				Ssrc = Ssrc,
 				InitiatorToken = invitation.InitiatorToken
 			};
-			using (var owner = MemoryPool<byte>.Shared.Rent(response.Length))
-			{
-				var packetMem = owner.Memory[0..response.Length];
-				response.WriteTo(packetMem);
-				await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
-			}
+			using var owner = MemoryPool<byte>.Shared.Rent(response.Length);
+			var packetMem = owner.Memory[0..response.Length];
+			response.WriteTo(packetMem);
+			await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
 		}
 
 		private async Task Respond(ClockSyncPacket initial, IPEndPoint remoteEndpoint, IUdpWrapper localWrapper, IPEndPoint localEndpoint)
@@ -199,12 +235,12 @@ namespace KadmiumRtpMidi
 			var timestamp = DateTime.Now.Ticks / 1000;
 			response.Timestamps[1] = (ulong)timestamp;
 
-			using (var owner = MemoryPool<byte>.Shared.Rent(response.Length))
-			{
-				var packetMem = owner.Memory[0..response.Length];
-				response.WriteTo(packetMem);
-				await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
-			}
+			using var owner = MemoryPool<byte>.Shared.Rent(response.Length);
+			var packetMem = owner.Memory[0..response.Length];
+			response.WriteTo(packetMem);
+			await localWrapper.Send(remoteEndpoint, localEndpoint, packetMem);
 		}
+
+		public IEnumerable<IPEndPoint> Peers => RemoteEndPoints;
 	}
 }

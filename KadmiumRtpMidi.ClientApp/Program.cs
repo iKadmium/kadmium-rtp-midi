@@ -18,6 +18,8 @@ namespace KadmiumRtpMidi.ClientApp
 			}
 			var session = new Session(addresses.First(), 5023, "Kadmium-rtp-midi");
 			session.OnPacketReceived += async (sender, e) => await Console.Out.WriteLineAsync(e.Packet.ToString());
+			var doreMidi = new IPEndPoint(IPAddress.Parse("192.168.0.93"), 5004);
+			await session.Invite(doreMidi);
 			while (true)
 			{
 				await Task.Delay(1000);

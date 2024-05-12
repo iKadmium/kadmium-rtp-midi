@@ -9,7 +9,7 @@
     <Title>Kadmium RTP Midi</Title>
     <Description>An RTP MIDI package for .Net Standard</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <Version>0.0.1</Version>
+    <Version>0.0.2</Version>
     <Authors>Jesse Higginson</Authors>
     <PackageProjectUrl>https://github.com/iKadmium/kadmium-rtp-midi</PackageProjectUrl>
     <RepositoryUrl>https://github.com/iKadmium/kadmium-rtp-midi.git</RepositoryUrl>

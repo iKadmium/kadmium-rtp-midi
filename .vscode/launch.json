@@ -10,7 +10,7 @@
 			"request": "launch",
 			"preLaunchTask": "build",
 			// If you have changed target frameworks, make sure to update the program path.
-			"program": "${workspaceFolder}/KadmiumRtpMidi.ClientApp/bin/Debug/net5.0/KadmiumRtpMidi.ClientApp.dll",
+			"program": "${workspaceFolder}/KadmiumRtpMidi.ClientApp/bin/Debug/net8.0/KadmiumRtpMidi.ClientApp.dll",
 			"args": [],
 			"cwd": "${workspaceFolder}/KadmiumRtpMidi.ClientApp",
 			// For more information about the 'console' field, see https://aka.ms/VSCode-CS-LaunchJson-Console
