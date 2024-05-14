@@ -28,7 +28,7 @@ namespace KadmiumRtpMidi
 		private List<IPEndPoint> RemoteEndPoints { get; } = new List<IPEndPoint>();
 
 		public event EventHandler<PacketReceivedEventArgs> OnPacketReceived;
-		
+
 		public Session(IPAddress address, ushort port, string serviceName)
 		{
 			BonjourName = serviceName;
@@ -50,20 +50,13 @@ namespace KadmiumRtpMidi
 			{
 				if (RemoteEndPoints != null)
 				{
-					var ackPacket = new AcknowledgementPacket
-					{
-						Ssrc = Ssrc,
-						SequenceNumber = LastSequenceNumber
-					};
-					using var owner = MemoryPool<byte>.Shared.Rent(AcknowledgementPacket.Length);
-					var packetMem = owner.Memory[0..AcknowledgementPacket.Length];
-					ackPacket.WriteTo(packetMem);
-					var tasks = new List<Task>();
+					await SendAcknowledgements();
 					foreach (var endpoint in RemoteEndPoints)
 					{
-						tasks.Add(ControlPortListener.Send(endpoint, ControlEndPoint, packetMem));
+						await Invite(endpoint);
 					}
-					await Task.WhenAll(tasks);
+
+					//await SendClockSync();
 				}
 			};
 			ResponseTimer.Start();
@@ -104,6 +97,41 @@ namespace KadmiumRtpMidi
 			Mdns.Start();
 		}
 
+		private async Task SendAcknowledgements()
+		{
+			var ackPacket = new AcknowledgementPacket
+			{
+				Ssrc = Ssrc,
+				SequenceNumber = LastSequenceNumber
+			};
+			using var owner = MemoryPool<byte>.Shared.Rent(AcknowledgementPacket.Length);
+			var packetMem = owner.Memory[0..AcknowledgementPacket.Length];
+			ackPacket.WriteTo(packetMem);
+			var tasks = new List<Task>();
+			foreach (var endpoint in RemoteEndPoints)
+			{
+				tasks.Add(ControlPortListener.Send(endpoint, ControlEndPoint, packetMem));
+			}
+			await Task.WhenAll(tasks);
+		}
+
+		private async Task SendClockSync()
+		{
+			var syncPacket = new ClockSyncPacket
+			{
+				Ssrc = Ssrc,
+				TimestampCount = 1
+			};
+			var timestamp = DateTime.Now.Ticks / 1000;
+			syncPacket.Timestamps[0] = (ulong)timestamp;
+
+			using var owner = MemoryPool<byte>.Shared.Rent(syncPacket.Length);
+			var packetMem = owner.Memory[0..syncPacket.Length];
+			syncPacket.WriteTo(packetMem);
+			var tasks = RemoteEndPoints.Select(x => ControlPortListener.Send(new IPEndPoint(x.Address, x.Port + 1), MidiEndPoint, packetMem));
+			await Task.WhenAll(tasks);
+		}
+
 		private async void OnControlPortPacketReceived(object sender, UdpReceiveResult e)
 		{
 			var packet = Packet.Parse(e.Buffer);
@@ -112,7 +140,10 @@ namespace KadmiumRtpMidi
 				case InvitationPacket invitation:
 					Console.WriteLine("Control Port invitation received from " + invitation.Name + " at " + e.RemoteEndPoint);
 					await Respond(invitation, e.RemoteEndPoint, ControlPortListener, ControlEndPoint);
-					RemoteEndPoints.Add(e.RemoteEndPoint);
+					if (!RemoteEndPoints.Any(x => x.Equals(e.RemoteEndPoint)))
+					{
+						RemoteEndPoints.Add(e.RemoteEndPoint);
+					}
 					break;
 				case ClockSyncPacket sync:
 					Console.WriteLine("Control Port clock sync received");
@@ -121,10 +152,14 @@ namespace KadmiumRtpMidi
 				case SessionClosePacket close:
 					Console.WriteLine("Control Port session close received");
 					RemoteEndPoints.Remove(e.RemoteEndPoint);
+					await Invite(e.RemoteEndPoint);
 					break;
 				case InvitationResponsePacket response:
 					Console.WriteLine("Invitation Response received");
-					RemoteEndPoints.Add(e.RemoteEndPoint);
+					if (!RemoteEndPoints.Any(x => x.Equals(e.RemoteEndPoint)))
+					{
+						RemoteEndPoints.Add(e.RemoteEndPoint);
+					}
 					var midiRemoteEndpoint = new IPEndPoint(e.RemoteEndPoint.Address, e.RemoteEndPoint.Port + 1);
 					await Invite(midiRemoteEndpoint, MidiPortListener, MidiEndPoint);
 					break;
@@ -175,7 +210,11 @@ namespace KadmiumRtpMidi
 						LastSequenceNumber = data.SequenceNumber;
 					}
 					var tasks = new List<Task>();
-					foreach (var endpoint in RemoteEndPoints.Except(new[] { e.RemoteEndPoint }))
+					var endpoints = RemoteEndPoints
+						.Select(x => new IPEndPoint(x.Address, x.Port + 1))
+						.Except(new[] { e.RemoteEndPoint })
+						.ToList();
+					foreach (var endpoint in endpoints)
 					{
 						tasks.Add(this.MidiPortListener.Send(endpoint, e.Buffer));
 					}
@@ -190,6 +229,10 @@ namespace KadmiumRtpMidi
 
 		public async Task Invite(IPEndPoint remoteEndpoint)
 		{
+			if (!RemoteEndPoints.Contains(remoteEndpoint))
+			{
+				RemoteEndPoints.Add(remoteEndpoint);
+			}
 			await Invite(remoteEndpoint, ControlPortListener, ControlEndPoint);
 		}
 
@@ -228,8 +271,7 @@ namespace KadmiumRtpMidi
 			{
 				Command = ControlPacketCommand.OK,
 				Ssrc = Ssrc,
-				TimestampCount = (byte)(initial.TimestampCount + 1),
-				Timestamps = new UInt64[3]
+				TimestampCount = (byte)(initial.TimestampCount + 1)
 			};
 			initial.Timestamps.CopyTo(response.Timestamps, 0);
 			var timestamp = DateTime.Now.Ticks / 1000;

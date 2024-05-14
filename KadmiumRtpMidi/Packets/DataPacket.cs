@@ -68,6 +68,15 @@ namespace KadmiumRtpMidi.Packets
 
 			while (commands.Length > 0)
 			{
+				if (deltaTime)
+				{
+					var timeDelta = commands[0];
+					commands = commands.Slice(1);
+				}
+				if (commands.Length == 0)
+				{
+					break;
+				}
 				var type = commands[0] & 0xF0;
 				switch (type)
 				{
@@ -79,11 +88,19 @@ namespace KadmiumRtpMidi.Packets
 						packet.Commands.Add(ControlChange.Parse(commands));
 						commands = commands.Slice(ControlChange.Length);
 						break;
+					case 0xC0:
+						packet.Commands.Add(ProgramChange.Parse(commands));
+						commands = commands.Slice(ProgramChange.Length);
+						break;
 					case 0xE0:
 						packet.Commands.Add(PitchBend.Parse(commands));
 						commands = commands.Slice(PitchBend.Length);
 						break;
+					default:
+						Console.Error.WriteLine("Unknown packet type " + type);
+						break;
 				}
+				deltaTime = true;
 			}
 
 			return packet;

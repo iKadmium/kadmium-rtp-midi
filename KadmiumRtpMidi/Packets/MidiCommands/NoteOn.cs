@@ -26,7 +26,7 @@ namespace KadmiumRtpMidi.Packets.MidiCommands
 
 		public override string ToString()
 		{
-			return ($"Channel {Channel} Note {NoteName} Velocity {Velocity}");
+			return ($"Note On: Channel {Channel} Note {NoteName} Velocity {Velocity}");
 		}
 
 		public static NoteOn Parse(ReadOnlySpan<byte> buffer)
