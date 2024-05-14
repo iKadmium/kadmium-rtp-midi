@@ -12,7 +12,7 @@ namespace KadmiumRtpMidi.Packets
 
 		public uint Ssrc { get; set; }
 		public byte TimestampCount { get; set; }
-		public UInt64[] Timestamps { get; set; }
+		public UInt64[] Timestamps { get; } = new UInt64[3];
 		public int Length => 36;
 
 		public ClockSyncPacket()
@@ -27,8 +27,7 @@ namespace KadmiumRtpMidi.Packets
 			var packet = new ClockSyncPacket
 			{
 				Ssrc = BinaryPrimitives.ReadUInt32BigEndian(bytes[4..8]),
-				TimestampCount = count,
-				Timestamps = new UInt64[TotalTimestampCount]
+				TimestampCount = count
 			};
 			var timestampBytes = bytes[12..];
 			for (int i = 0; i < TotalTimestampCount; i++)

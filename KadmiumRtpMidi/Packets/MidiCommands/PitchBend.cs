@@ -13,7 +13,7 @@ namespace KadmiumRtpMidi.Packets.MidiCommands
 
 		public override string ToString()
 		{
-			return ($"Channel {Channel} PitchBend Value {Value}");
+			return ($"Pitch Bend: Channel {Channel} PitchBend Value {Value}");
 		}
 
 		public static PitchBend Parse(ReadOnlySpan<byte> buffer)
